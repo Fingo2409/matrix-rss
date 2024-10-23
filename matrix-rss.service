@@ -1,0 +1,12 @@
+[Unit]
+Description=Matrix RSS Service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/matrix-rss
+Restart=always
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
