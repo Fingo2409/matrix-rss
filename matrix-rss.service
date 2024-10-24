@@ -4,6 +4,7 @@ After=network.target
 
 [Service]
 ExecStart=/usr/bin/matrix-rss
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 User=root
 Group=root

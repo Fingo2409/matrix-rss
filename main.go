@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"reflect"
+	"syscall"
 	"time"
 
 	"github.com/gomarkdown/markdown"
@@ -35,14 +36,16 @@ type Config struct {
 	CheckInterval int      `json:"check_interval"`
 }
 
-func loadConfig(configPath string) (Config, error) {
-	var config Config
-	file, err := os.ReadFile(configPath)
+var config Config
+
+func loadConfig(configPath string) error {
+	file, err := os.Open(configPath)
 	if err != nil {
-		return config, err
+		return err
 	}
-	err = json.Unmarshal(file, &config)
-	return config, err
+	defer file.Close()
+	decoder := json.NewDecoder(file)
+	return decoder.Decode(&config)
 }
 
 func createDefaultConfig(configPath string) error {
@@ -64,29 +67,15 @@ func createDefaultConfig(configPath string) error {
 	return os.WriteFile(configPath, configData, 0644)
 }
 
-func fetchFeed(url string) (Feed, error) {
-	resp, err := http.Get(url)
-	if err != nil {
-		return Feed{}, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return Feed{}, err
-	}
-
-	var feed Feed
-	err = xml.Unmarshal(body, &feed)
-	if err != nil {
-		return Feed{}, err
-	}
-
-	return feed, nil
+func isDefaultConfig(config, defaultConfig Config) bool {
+	return reflect.DeepEqual(config.FeedURLs, defaultConfig.FeedURLs) &&
+		config.MatrixServer == defaultConfig.MatrixServer &&
+		config.MatrixRoomID == defaultConfig.MatrixRoomID &&
+		config.MatrixToken == defaultConfig.MatrixToken &&
+		config.CheckInterval == defaultConfig.CheckInterval
 }
 
 func sendMatrixMessage(server, roomID, token, message string) error {
-	// Convert Markdown message to HTML
 	htmlMessage := markdown.ToHTML([]byte(message), nil, nil)
 
 	url := fmt.Sprintf("%s/_matrix/client/r0/rooms/%s/send/m.room.message?access_token=%s", server, roomID, token)
@@ -117,18 +106,24 @@ func sendMatrixMessage(server, roomID, token, message string) error {
 	return nil
 }
 
-func isDefaultConfig(config, defaultConfig Config) bool {
-	return reflect.DeepEqual(config.FeedURLs, defaultConfig.FeedURLs) &&
-		config.MatrixServer == defaultConfig.MatrixServer &&
-		config.MatrixRoomID == defaultConfig.MatrixRoomID &&
-		config.MatrixToken == defaultConfig.MatrixToken &&
-		config.CheckInterval == defaultConfig.CheckInterval
+func fetchFeed(url string) (*Feed, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var feed Feed
+	if err := xml.NewDecoder(resp.Body).Decode(&feed); err != nil {
+		return nil, err
+	}
+
+	return &feed, nil
 }
 
 func main() {
 	configPath := "/etc/matrix-rss/config.json"
-	config, err := loadConfig(configPath)
-	if err != nil {
+	if err := loadConfig(configPath); err != nil {
 		fmt.Println("Config not found, creating default config...")
 		if err := createDefaultConfig(configPath); err != nil {
 			fmt.Println("Error creating default config:", err)
@@ -138,7 +133,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Check if the config contains default values
 	defaultConfig := Config{
 		FeedURLs:      []string{"https://example.com/feed1", "https://example.com/feed2"},
 		MatrixServer:  "https://matrix.org",
@@ -154,6 +148,20 @@ func main() {
 
 	lastUpdates := make(map[string]string)
 
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, syscall.SIGHUP)
+
+	go func() {
+		for range signalChan {
+			fmt.Println("Reloading config...")
+			if err := loadConfig(configPath); err != nil {
+				fmt.Println("Error reloading config:", err)
+			} else {
+				fmt.Println("Config reloaded successfully")
+			}
+		}
+	}()
+
 	for {
 		for _, feedURL := range config.FeedURLs {
 			feed, err := fetchFeed(feedURL)
@@ -165,7 +173,6 @@ func main() {
 			if len(feed.Entries) > 0 && feed.Entries[0].Updated != lastUpdates[feedURL] {
 				lastUpdates[feedURL] = feed.Entries[0].Updated
 
-				// Create the message with the domain as plain text and the title as a hyperlink
 				message := fmt.Sprintf("IT-News: [%s](%s)", feed.Entries[0].Title, feed.Entries[0].Link.Href)
 				err = sendMatrixMessage(config.MatrixServer, config.MatrixRoomID, config.MatrixToken, message)
 				if err != nil {
